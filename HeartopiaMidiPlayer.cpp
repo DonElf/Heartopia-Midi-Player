@@ -177,7 +177,7 @@ public:
 		std::streampos headerStart = file.tellg();
 		Read16(file); // format
 		uint16_t tracks = Read16(file);
-		uint16_t tpqn = Read16(file);
+		uint16_t tpqn = Read16(file); // Ticks per quarter note
 
 		// Skip any extra header bytes
 		if (headerLength > 6) {
@@ -194,11 +194,17 @@ public:
 			auto trackEnd = file.tellg() + (std::streamoff)trackLength;
 
 			uint32_t tick = 0;
+			uint64_t currentUs = 0;
+			uint32_t tempo = 500000; // Microseconds per quarter note
 			uint8_t lastStatus = 0;
 
 			// While we're still in the track. While loop. Scary.
 			while (file.tellg() < trackEnd) {
-				tick += ReadVar(file);
+				uint32_t delta = ReadVar(file);
+				tick += delta;
+
+				// Advance real time using current tempo
+				currentUs += (uint64_t)delta * tempo / tpqn;
 
 				uint8_t status = 0;
 				file.read((char*)&status, 1);
@@ -218,9 +224,19 @@ public:
 					file.read((char*)&note, 1);
 					file.read((char*)&vel, 1);
 
-					bool on = (type == 0x90 && vel > 0);
-					uint64_t ms = TickToMs(tick, tpqn);
-					events.push_back({ms,note,on});
+					events.push_back({currentUs / 1000, note, type == 0x90 && vel > 0});
+				} else if (status == 0xFF) { // I still need to fix this. TODO.
+					uint8_t metaType = 0;
+					file.read((char*)&metaType, 1);
+					uint32_t len = ReadVar(file);
+
+					if (metaType == 0x51 && len == 3) {
+						uint8_t t[3];
+						file.read((char*)t, 3);
+						tempo = (t[0] << 16) | (t[1] << 8) | t[2];
+					} else {
+						file.seekg(len, std::ios::cur);
+					}
 				} else {
 					SkipEvent(file, status);
 				}
@@ -237,12 +253,6 @@ public:
 	}
 
 private:
-	static inline  uint64_t TickToMs(uint64_t tick, uint16_t tpqn) {
-		constexpr double tempo = 500000.0; // default 120 BPM
-		double usPerTick = tempo / tpqn;
-		return static_cast<uint64_t>((double)tick * usPerTick / 1000.0);
-	}
-
 	static inline uint32_t ReadVar(std::ifstream& f) {
 		uint32_t value = 0;
 		uint8_t c = 0;
