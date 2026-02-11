@@ -4,7 +4,7 @@
  |   By Don_Elf
  |   https://github.com/DonElf/Heartopia-Midi-Player
  |
- |   ©2025 Don_Elf
+ |   Â©2025 Don_Elf
  |   Some Rights Reserved.
  |
  |
@@ -173,10 +173,16 @@ public:
 		if (ReadString(file, 4) != "MThd")
 			throw MidiFileException("Invalid MIDI header");
 
-		Read32(file); // header length
+		uint32_t headerLength = Read32(file);
+		std::streampos headerStart = file.tellg();
 		Read16(file); // format
 		uint16_t tracks = Read16(file);
 		uint16_t tpqn = Read16(file);
+
+		// Skip any extra header bytes
+		if (headerLength > 6) {
+			file.seekg(headerStart + static_cast<std::streamoff>(headerLength));
+		}
 
 		std::vector<MidiEvent> events;
 
@@ -219,6 +225,9 @@ public:
 					SkipEvent(file, status);
 				}
 			}
+
+			// Just to be safe.
+			file.seekg(trackEnd);
 		}
 
 		// Sort the events by time.
@@ -282,7 +291,7 @@ private:
 		return value;
 	}
 
-	static inline  std::string ReadString(std::ifstream& f, size_t n) {
+	static inline std::string ReadString(std::ifstream& f, size_t n) {
 		// Erm... Pretty straightforward.
 		// String. Read. Return.
 		std::string s(n, ' ');
@@ -313,8 +322,15 @@ private:
 		else if (type == 0xA0 || type == 0xB0 || type == 0xE0)
 			f.seekg(2, std::ios::cur);
 
-		// Meta-event or system something or-rather. Check the length, then skip the length.
-		else if (status == 0xFF || status == 0xF0 || status == 0xF7)
+		// Meta event
+		else if (status == 0xFF) {
+			uint8_t metaType = 0;
+			f.read(reinterpret_cast<char*>(&metaType), 1);
+			f.seekg(ReadVar(f), std::ios::cur);
+		}
+
+		// System something or-rather. Check the length, then skip the length.
+		else if ( status == 0xF0 || status == 0xF7)
 			f.seekg(ReadVar(f), std::ios::cur);
 	}
 };
@@ -438,9 +454,10 @@ int main(int argc, char** argv) {
 					emitter.SendKey(*mapped, e.noteOn);
 			}
 		}
-	} catch (const std::exception& e) {
-		// ZOINKS!
+	} catch (const std::exception& e) { // ZOINKS!
 		std::cerr << "Error: " << e.what() << "\n";
+		std::cout << "\n\nPress Enter to quit.\n";
+		std::cin.get(); // Wait for enter
 		return 1;
 	}
 
