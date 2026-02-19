@@ -33,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 #include <optional>
+#include <cstdint>
 
 // Dedicated exception for MIDI file errors
 class MidiFileException : public std::runtime_error { using runtime_error::runtime_error; };
@@ -160,6 +161,38 @@ struct MidiEvent {
 };
 
 class MidiFileParser {
+private:
+	// Intermediate event stored with tick time (before tempo conversion)
+	struct RawEvent {
+		uint32_t tick;
+		int note;
+		bool noteOn;
+	};
+
+	// A tempo change at a specific tick position
+	struct TempoChange {
+		uint32_t tick;
+		uint32_t tempo; // microseconds per quarter note
+	};
+
+	// Convert an absolute tick position to microseconds using the global tempo map.
+	// This ensures all tracks share the same tempo changes, fixing multi-track timing.
+	static uint64_t TickToUs(uint32_t tick, const std::vector<TempoChange>& tempoMap, uint16_t tpqn) {
+		uint64_t us = 0;
+		uint32_t lastTick = 0;
+		uint32_t currentTempo = 500000; // default 120 BPM
+
+		for (const auto& tc : tempoMap) {
+			if (tc.tick >= tick) break;
+			us += (uint64_t)(tc.tick - lastTick) * currentTempo / tpqn;
+			lastTick = tc.tick;
+			currentTempo = tc.tempo;
+		}
+
+		us += (uint64_t)(tick - lastTick) * currentTempo / tpqn;
+		return us;
+	}
+
 public:
 	static std::vector<MidiEvent> Parse(const std::string& path) {
 		// Step 1: Open the file.
@@ -184,32 +217,27 @@ public:
 			file.seekg(headerStart + static_cast<std::streamoff>(headerLength));
 		}
 
-		std::vector<MidiEvent> events;
+		std::vector<RawEvent> rawEvents;
+		std::vector<TempoChange> tempoMap;
 
-		for (int t = 0; t < tracks; ++t) {
-			if (ReadString(file, 4) != "MTrk") // Something's gone done diddly dookie.
+		for (int tr = 0; tr < tracks; ++tr) {
+			if (ReadString(file, 4) != "MTrk")
 				throw MidiFileException("Invalid track header");
 
 			auto trackLength = Read32(file);
 			auto trackEnd = file.tellg() + (std::streamoff)trackLength;
 
 			uint32_t tick = 0;
-			uint64_t currentUs = 0;
-			uint32_t tempo = 500000; // Microseconds per quarter note
 			uint8_t lastStatus = 0;
 
-			// While we're still in the track. While loop. Scary.
 			while (file.tellg() < trackEnd) {
 				uint32_t delta = ReadVar(file);
 				tick += delta;
 
-				// Advance real time using current tempo
-				currentUs += (uint64_t)delta * tempo / tpqn;
-
 				uint8_t status = 0;
 				file.read((char*)&status, 1);
 
-				if (status < 0x80) { // Eek! Go back
+				if (status < 0x80) {
 					file.seekg(-1, std::ios::cur);
 					status = lastStatus;
 				} else {
@@ -224,16 +252,17 @@ public:
 					file.read((char*)&note, 1);
 					file.read((char*)&vel, 1);
 
-					events.push_back({currentUs / 1000, note, type == 0x90 && vel > 0});
-				} else if (status == 0xFF) { // I still need to fix this. TODO.
+					rawEvents.push_back({tick, note, type == 0x90 && vel > 0});
+				} else if (status == 0xFF) {
 					uint8_t metaType = 0;
 					file.read((char*)&metaType, 1);
 					uint32_t len = ReadVar(file);
 
 					if (metaType == 0x51 && len == 3) {
-						uint8_t t[3];
-						file.read((char*)t, 3);
-						tempo = (t[0] << 16) | (t[1] << 8) | t[2];
+						uint8_t buf[3];
+						file.read((char*)buf, 3);
+						uint32_t newTempo = (buf[0] << 16) | (buf[1] << 8) | buf[2];
+						tempoMap.push_back({tick, newTempo});
 					} else {
 						file.seekg(len, std::ios::cur);
 					}
@@ -242,12 +271,22 @@ public:
 				}
 			}
 
-			// Just to be safe.
 			file.seekg(trackEnd);
 		}
 
+		// Sort tempo map by tick position
+		std::sort(tempoMap.begin(), tempoMap.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
+
+		// Convert tick-based events to real-time events using the global tempo map
+		std::vector<MidiEvent> events;
+		events.reserve(rawEvents.size());
+
+		for (const auto& raw : rawEvents) {
+			events.push_back({TickToUs(raw.tick, tempoMap, tpqn) / 1000, raw.note, raw.noteOn});
+		}
+
 		// Sort the events by time.
-		std::ranges::sort(events, [](auto& a, auto& b) { return a.timeMs < b.timeMs; });
+		std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.timeMs < b.timeMs; });
 
 		return events;
 	}
@@ -275,30 +314,18 @@ private:
 	}
 
 	static inline uint32_t Read32(std::ifstream& f) {
-		// Get the stuff.
-		uint32_t value = 0;
-		f.read(reinterpret_cast<char*>(&value), sizeof(value));
-
-		// Endiness
-		if constexpr (std::endian::native == std::endian::little)
-			value = std::byteswap(value);
-
-		// Return
-		return value;
+		// Read 4 bytes in big-endian order (MIDI standard)
+		uint8_t b[4];
+		f.read(reinterpret_cast<char*>(b), 4);
+		return (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | uint32_t(b[3]);
 	}
 
 
 	static inline uint16_t Read16(std::ifstream& f) {
-		// Get the stuff.
-		uint16_t value = 0;
-		f.read(reinterpret_cast<char*>(&value), sizeof(value));
-
-		// Endiness
-		if constexpr (std::endian::native == std::endian::little)
-			value = std::byteswap(value);
-
-		// Return
-		return value;
+		// Read 2 bytes in big-endian order (MIDI standard)
+		uint8_t b[2];
+		f.read(reinterpret_cast<char*>(b), 2);
+		return (uint16_t(b[0]) << 8) | uint16_t(b[1]);
 	}
 
 	static inline std::string ReadString(std::ifstream& f, size_t n) {
