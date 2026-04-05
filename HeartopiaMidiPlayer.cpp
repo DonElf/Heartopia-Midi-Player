@@ -4,7 +4,7 @@
  |   By Don_Elf
  |   https://github.com/DonElf/Heartopia-Midi-Player
  |
- |   ©2025 Don_Elf
+ |   ©2026 Don_Elf
  |   Some Rights Reserved.
  |
  |
@@ -20,7 +20,6 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
-#include <iostream>
 #include <fstream>
 #include <vector>
 #include <unordered_map>
@@ -367,7 +366,7 @@ private:
 		}
 
 		// System something or-rather. Check the length, then skip the length.
-		else if ( status == 0xF0 || status == 0xF7)
+		else if (status == 0xF0 || status == 0xF7)
 			f.seekg(ReadVar(f), std::ios::cur);
 	}
 };
@@ -421,10 +420,11 @@ private:
 		}
 	}
 
+
 public:
 	MidiLiveInput(MidiMapper& mapper, KeyboardEmitter& emitter) : mapper(mapper), emitter(emitter) {}
 
-	void Run() {
+	void Start(HWND statusHwnd) {
 		// If there are no MIDI devices attached, we can't get midi input. Crazy. Crazy? I was-
 		if (midiInGetNumDevs() == 0)
 			throw MidiDeviceException("No MIDI devices");
@@ -437,67 +437,359 @@ public:
 		// Start listening to midi input.
 		midiInStart(handle);
 
-		std::cout << "Listening... Press Enter to quit.\n";
-		std::cin.get(); // Wait for enter
+		SetWindowTextA(statusHwnd, "Listening for MIDI input...");
+	}
 
+	void Stop(HWND statusHwnd) {
 		// Stop listening to midi input.
 		midiInStop(handle);
 		midiInClose(handle);
+
+		SetWindowTextA(statusHwnd, "Stopped.");
+
+		// Clear the handle
+		handle = {};
 	}
 };
 
-// Can we put sunglasses on functions? I wish we could.
-int main(int argc, char** argv) {
-	try { // Good error handling is for dorks. Everything in a try catch(e).
-		bool whitesOnly = false;
-		std::string file;
 
-		// If there are arguments
-		for (int i = 1; i < argc; i++) {
-			std::string arg = argv[i]; // Only one get. Something something multiple gets in the same contiguous memory are quick (I don't care). I had to google how to spell contiguous btw.
+// Control IDs. have to be ints rather than HMENU to appease the linter's pointer const requirements.
+constexpr int ID_EDIT_FILE  = 101;
+constexpr int ID_BTN_BROWSE = 102;
+constexpr int ID_CHK_WHITES = 103;
+constexpr int ID_CHK_LOOP   = 104;
+constexpr int ID_BTN_PLAY   = 105;
+constexpr int ID_BTN_LIVE   = 106;
+constexpr int ID_BTN_STOP   = 107;
+constexpr int ID_LBL_STATUS = 108;
 
-			if (arg == "--whites") 
-				whitesOnly = true; // Okay, I know this LOOKS bad-
-			else file = arg;
-		}
+struct AppState {
+	std::string filePath;
+	bool whitesOnly = false;
+	bool loop = false;
+	std::atomic<bool> playing = false;
+	std::atomic<bool> liveMode = false;
 
-		MidiMapper mapper(whitesOnly);
+	// Handles
+	HWND handleEdit{};
+	HWND handleChkWhites{};
+	HWND handleChkLoop{};
+	HWND handleBtnPlay{};
+	HWND handleBtnLive{};
+	HWND handleBtnStop{};
+	HWND handleStatus{};
+
+	// Live input session stuff
+	std::unique_ptr<MidiMapper> liveMapper;
+	std::unique_ptr<KeyboardEmitter> liveEmitter;
+	std::unique_ptr<MidiLiveInput> liveInput;
+};
+
+// Global state pointer for WndProc
+AppState* g_state = nullptr;
+std::jthread playThread;
+
+void Play(AppState& state) {
+	// Put the playing and parsing inside a try/catch for "good enough" error handling
+	try {
+		// Update value
+		state.whitesOnly = (IsDlgButtonChecked(GetParent(state.handleChkWhites), ID_CHK_WHITES) == BST_CHECKED);
+
+		// Set up the map, emitter, and parse the midi file.
+		// Parsing is probably one of the most likely parts to throw an error.
+		MidiMapper mapper(state.whitesOnly);
 		KeyboardEmitter emitter;
+		auto events = MidiFileParser::Parse(state.filePath);
 
-		if (file.empty()) {
-			// If we weren't given a file to play, try to play from a midi device.
-			MidiLiveInput live(mapper, emitter);
-			live.Run();
+		// Wait 3 seconds.
+		Sleep(3000);
 
-			// We could put a return here and not need the else, but I think this is more readable. Don't you?
-		} else {
-			// Try and read the file.
-			auto events = MidiFileParser::Parse(file);
+		// Set text anticipatorily. That's not a word, I'm pretty sure. In anticipation.
+		SetWindowTextA(state.handleStatus, "Playing...");
 
-			// Wait 3 seconds, to let you get ready.
-			std::cout << "Playback in 3 seconds...\n";
-			std::this_thread::sleep_for(std::chrono::seconds(3));
+		// How often do you get to use a do while loop in programming? I find them pretty rare, all things considered...
+		do {
+			// Update
+			state.loop = (IsDlgButtonChecked(GetParent(state.handleChkLoop), ID_CHK_LOOP) == BST_CHECKED);
 
-			// Start the clock! Ready! Set!
+			// Set the start before we play the song.
+			// I forgot to move this into the do-while before and spent far too long figuring out the issue.
 			auto start = std::chrono::steady_clock::now();
 
-			// GO!
+			// Iterate through and play each event
 			for (auto const& e : events) {
-				// Sleep until the event.
+				// Stop early if requested
+				if (!state.playing) break;
+
+				// Sleep intil the event
 				std::this_thread::sleep_until(start + std::chrono::milliseconds(e.timeMs));
 
 				// Get the corresponding input to the event. If it exists, play it.
 				if (auto mapped = mapper.MapNote(e.note); mapped.has_value())
 					emitter.SendKey(*mapped, e.noteOn);
 			}
-		}
-	} catch (const std::exception& e) { // ZOINKS!
-		std::cerr << "Error: " << e.what() << "\n";
-		std::cout << "\n\nPress Enter to quit.\n";
-		std::cin.get(); // Wait for enter
-		return 1;
+		} while (state.loop && state.playing);
+	} catch (const std::exception& ex) { // ZOINKS!
+		SetWindowTextA(state.handleStatus, ex.what());
 	}
 
-	// :thumbsup:
+	// Re-enable the buttons.
+	EnableWindow(state.handleBtnPlay, TRUE);
+	EnableWindow(state.handleBtnLive, TRUE);
+	EnableWindow(state.handleBtnStop, FALSE);
+
+	// state.playing will be true if we finished, or false if we were stopped.
+	if (state.playing) {
+		state.playing = false;
+		SetWindowTextA(state.handleStatus, "Done.");
+	} else {
+		SetWindowTextA(state.handleStatus, "Stopped.");
+	}
+}
+
+void StartFilePlayback(AppState& state) {
+	// Grab the file path from the edit box
+	std::string buf(256, '\0');
+	GetWindowTextA(state.handleEdit, buf.data(), 256);
+
+	//resize the path to what's needed
+	buf.resize(strnlen(buf.data(), buf.size()));
+
+	state.filePath = buf;
+
+	// Null check. Uh. Empty check, sorry. Yuh.
+	if (state.filePath.empty()) {
+		SetWindowTextA(state.handleStatus, "No file selected.");
+		return;
+	}
+
+	// Playing. Read line below for more details.
+	state.playing = true;
+
+	// Set the buttons to active/inactive respectively.
+	EnableWindow(state.handleBtnPlay, FALSE);
+	EnableWindow(state.handleBtnLive, FALSE);
+	EnableWindow(state.handleBtnStop, TRUE);
+
+	// We set the text here, but we start the timer in the Play function inside the thread, so we still have the UI on the main thread.
+	SetWindowTextA(state.handleStatus, "Playback in 3 seconds...");
+
+	// Start the thread.
+	playThread = std::jthread(Play, std::ref(state));
+}
+
+void StartLiveInput(AppState& state) {
+	try {
+		// Check whites only
+		state.whitesOnly = (IsDlgButtonChecked(GetParent(state.handleChkWhites), ID_CHK_WHITES) == BST_CHECKED);
+
+		state.liveMapper = std::make_unique<MidiMapper>(state.whitesOnly);
+		state.liveEmitter = std::make_unique<KeyboardEmitter>();
+		state.liveInput = std::make_unique<MidiLiveInput>(*state.liveMapper, *state.liveEmitter);
+
+		state.liveInput->Start(state.handleStatus);
+
+		state.liveMode = true;
+		EnableWindow(state.handleBtnPlay, FALSE);
+		EnableWindow(state.handleBtnLive, FALSE);
+		EnableWindow(state.handleBtnStop, TRUE);
+	} catch (const std::exception& ex) {
+		SetWindowTextA(state.handleStatus, ex.what());
+	}
+}
+
+void Stop(AppState& state) {
+	if (state.playing) {
+		state.playing = false; // Signal the playback thread to exit
+	}
+
+	if (state.liveMode) {
+		// Clear and reset everything
+		state.liveInput->Stop(state.handleStatus);
+		state.liveInput.reset();
+		state.liveEmitter.reset();
+		state.liveMapper.reset();
+		state.liveMode = false;
+
+		// Re-enable the buttons.
+		EnableWindow(state.handleBtnPlay, TRUE);
+		EnableWindow(state.handleBtnLive, TRUE);
+		EnableWindow(state.handleBtnStop, FALSE);
+	}
+}
+
+// Create the UI
+LRESULT CALLBACK Create(HWND hwnd, LPARAM lParam) {
+	// Get the HInstance
+	HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
+
+	// File selector
+	CreateWindowW(L"STATIC", L"MIDI File:",
+		WS_CHILD | WS_VISIBLE,
+		10, 14, 70, 20, hwnd, nullptr, hInst, nullptr);
+
+	g_state->handleEdit = CreateWindowW(L"EDIT", L"",
+		WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+		85, 10, 380, 24, hwnd, (HMENU)ID_EDIT_FILE, hInst, nullptr);
+
+	CreateWindowW(L"BUTTON", L"Browse...",
+		WS_CHILD | WS_VISIBLE,
+		475, 10, 80, 24, hwnd, (HMENU)ID_BTN_BROWSE, hInst, nullptr);
+
+
+	// Checkboxes
+	g_state->handleChkWhites = CreateWindowW(L"BUTTON", L"15 keys (Double Row)",
+		WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+		10, 45, 200, 24, hwnd, (HMENU)ID_CHK_WHITES, hInst, nullptr);
+
+	g_state->handleChkLoop = CreateWindowW(L"BUTTON", L"Loop",
+		WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+		200, 45, 120, 24, hwnd, (HMENU)ID_CHK_LOOP, hInst, nullptr);
+
+
+	// Buttons
+	g_state->handleBtnPlay = CreateWindowW(L"BUTTON", L"Play File",
+		WS_CHILD | WS_VISIBLE,
+		10, 80, 90, 28, hwnd, (HMENU)ID_BTN_PLAY, hInst, nullptr);
+
+	g_state->handleBtnLive = CreateWindowW(L"BUTTON", L"Live Input",
+		WS_CHILD | WS_VISIBLE,
+		110, 80, 90, 28, hwnd, (HMENU)ID_BTN_LIVE, hInst, nullptr);
+
+	g_state->handleBtnStop = CreateWindowW(L"BUTTON", L"Stop",
+		WS_CHILD | WS_VISIBLE,
+		210, 80, 90, 28, hwnd, (HMENU)ID_BTN_STOP, hInst, nullptr);
+
+
+	// Disable until playing
+	EnableWindow(g_state->handleBtnStop, FALSE);
+
+
+	// Status label
+	g_state->handleStatus = CreateWindowW(L"STATIC", L"Ready.",
+		WS_CHILD | WS_VISIBLE,
+		10, 120, 540, 20, hwnd, (HMENU)ID_LBL_STATUS, hInst, nullptr);
+
+
 	return 0;
+}
+
+LRESULT CALLBACK Command(WPARAM wParam, HWND hwnd) {
+	switch (LOWORD(wParam)) {
+		// Open file browser
+		case ID_BTN_BROWSE: {
+			char buf[256] = {}; // C-String... Sorry...
+
+			OPENFILENAMEA ofn{};
+			ofn.lStructSize = sizeof(ofn);
+			ofn.hwndOwner = hwnd;
+			ofn.lpstrFilter = "MIDI Files\0*.mid;*.midi\0All Files\0*.*\0";
+			ofn.lpstrFile = buf;
+			ofn.nMaxFile = sizeof(buf);
+			ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+			if (GetOpenFileNameA(&ofn)) {
+				SetWindowTextA(g_state->handleEdit, buf);
+				g_state->filePath = buf;
+			}
+
+			break;
+		}
+
+		case ID_CHK_WHITES:
+			// Toggle the checkbox state
+			g_state->whitesOnly = !(IsDlgButtonChecked(hwnd, ID_CHK_WHITES) == BST_CHECKED);
+			CheckDlgButton(hwnd, ID_CHK_WHITES, g_state->whitesOnly ? BST_CHECKED : BST_UNCHECKED);
+			break;
+
+		case ID_CHK_LOOP:
+			// Toggle the checkbox state. Same code as above.
+			g_state->loop = !(IsDlgButtonChecked(hwnd, ID_CHK_LOOP) == BST_CHECKED);
+			CheckDlgButton(hwnd, ID_CHK_LOOP, g_state->loop ? BST_CHECKED : BST_UNCHECKED);
+			break;
+
+		case ID_BTN_PLAY:
+			StartFilePlayback(*g_state);
+			break;
+
+		case ID_BTN_LIVE:
+			StartLiveInput(*g_state);
+			break;
+
+		case ID_BTN_STOP:
+			Stop(*g_state);
+			break;
+
+		default: // Linter.
+			break;
+	}
+
+	return 0;
+}
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	// When a button is pressed, we can just switch it.
+	switch (msg) {
+		case WM_CREATE:
+			return Create(hwnd, lParam);
+
+		case WM_COMMAND:
+			return Command(wParam, hwnd);
+
+		case WM_DESTROY:
+			// Clean up if still running
+			if (g_state->playing || g_state->liveMode)
+				Stop(*g_state);
+			PostQuitMessage(0);
+			return 0;
+			
+		// Linter wants default. I dunno, man. I tried and it broke.
+	}
+
+	return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+	// Tracks our variables for us...
+	AppState state{};
+	g_state = &state;
+
+	// Register window class
+	WNDCLASSEXW wc{};
+	wc.cbSize = sizeof(wc);
+	wc.lpfnWndProc = WndProc;
+	wc.hInstance = hInstance;
+	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); // Standard dialogue grey
+	wc.lpszClassName = L"HeartopiaMidiPlayer";
+	RegisterClassExW(&wc);
+
+	// Create the window
+	HWND hwnd = CreateWindowExW(
+		0,
+		L"HeartopiaMidiPlayer",
+		L"Heartopia MIDI Player",
+		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, // Fixed size
+		CW_USEDEFAULT, CW_USEDEFAULT,
+		580, 190,
+		nullptr, nullptr,
+		hInstance, nullptr
+	);
+
+	ShowWindow(hwnd, nCmdShow);
+	UpdateWindow(hwnd);
+
+	// Message loop only wakes up when something actually happens. We hate polling in this household.
+	MSG msg;
+	while (GetMessage(&msg, nullptr, 0, 0)) {
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	return 0;
+}
+
+// If input is main instead of WinMain, just use WinMain anyway.
+int main() {
+	WinMain(GetModuleHandle(nullptr), nullptr, nullptr, SW_SHOWDEFAULT);
 }
