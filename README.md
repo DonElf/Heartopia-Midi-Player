@@ -3,8 +3,8 @@ Turns midi device inputs or .mid files into in-game piano/instrument inputs.
 This program was primarily made with the 22 key layout, but also supports 15 keys (Double row). For that, see [this section](##How-to-use-15-Keys).
 
 ## How to use a Midi Instrument
-Step 1: Connect the instrument to your computer.
-Step 2: In the program, hit the "Live Input" button.
+Step 1: Connect the instrument to your computer.  
+Step 2: In the program, hit the "Live Input" button.  
 Step 3: Play the instrument, and it should play in game.
 
 ## How to play a .Mid file
