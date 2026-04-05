@@ -3,37 +3,22 @@ Turns midi device inputs or .mid files into in-game piano/instrument inputs.
 This program was primarily made with the 22 key layout, but also supports 15 keys (Double row). For that, see [this section](##How-to-use-15-Keys).
 
 ## How to use a Midi Instrument
-1. Connect the instrument to your computer.
-2. Run the program.  
-👍
+Step 1: Connect the instrument to your computer.
+Step 2: In the program, hit the "Live Input" button.
+Step 3: Play the instrument, and it should play in game.
 
 ## How to play a .Mid file
-To play a .Mid file, the simplest solution I'd suggest is to right-click the file, select "Open with" -> "Choose another app".  
-<img width="741" height="380" alt="image" src="https://github.com/user-attachments/assets/54d41c16-518e-4217-8e64-3d75f078f266" />  
+Step 1: Open the app.  
+<img width="592" height="201" alt="image" src="https://github.com/user-attachments/assets/21f3814c-235e-49c1-968d-a8d477dcb7ef" />  
 
-From here, scroll down and select "Choose an app on your PC", and navigate to the program. It should open, and after a 3 second delay play the song.  
-<img width="423" height="569" alt="image" src="https://github.com/user-attachments/assets/94792f4a-1f20-41f8-8cd5-588b53859621" />  
-<img width="632" height="112" alt="image" src="https://github.com/user-attachments/assets/0557a1c1-2cbd-471b-9602-b6a4ee4ab9c3" />  
+Step 2: Hit browse and choose your file.  
+<img width="1041" height="157" alt="image" src="https://github.com/user-attachments/assets/e1789158-c204-4b21-92ff-bcf4c74e07f8" />  
 
-From now on, you should also see the program as an option in the "Open with" menu for .Mid files.  
-<img width="605" height="318" alt="image" src="https://github.com/user-attachments/assets/0c834ee7-6c71-45e5-a858-4afc0c40c5bd" />  
+Step 3: Hit play, tab back into your game (where you're hopefully sitting at a piano), and wait 3 seconds.  
 
-<br>
-<br>
-
-Alternatively, you can use the command line by providing the file as a paramater.  
-<img width="834" height="202" alt="image" src="https://github.com/user-attachments/assets/20abb529-57bd-41e4-a31f-88966f2540f7" />
 
 ## How to use 15 Keys
-To use the 15-key mode, run the program with `--whites` as one of the paramaters. The order does not matter.  
-<img width="816" height="226" alt="image" src="https://github.com/user-attachments/assets/6fff1555-85e7-493d-8b4f-f8f62a288dee" />
-
-<br>
-<br>
-
-Alternatively, create a shortcut to the program and add `--whites` to the target  
-<img width="635" height="476" alt="image" src="https://github.com/user-attachments/assets/353f618c-b94e-4520-a107-1c18726a1be0" />  
-<img width="702" height="331" alt="image" src="https://github.com/user-attachments/assets/1d2796de-e400-417f-9e9b-ab9893783c81" />
+To use the 15-key mode, check the "15 keys (Double Row)" checkbox before hitting play.
 
 
 ## I got an error!
