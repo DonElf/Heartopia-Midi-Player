@@ -18,7 +18,12 @@
 
 #include <windows.h>
 #include <mmsystem.h>
+#include <CommCtrl.h>
+
+// Requires MSVC
+#pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "winmm.lib")
+
 
 #include <fstream>
 #include <vector>
@@ -150,6 +155,22 @@ public:
 
 		return std::nullopt;
 	}
+
+	int GetExtremeValue(auto Sort) {
+		if (map.empty())
+			return 0;
+
+		// Start with the first value in the map.
+		int mostValue = map.begin()->first;
+
+		// For each value, sort it based on the lambda to find the most extreme.
+		for (auto [note, _] : map) {
+			if (Sort(note, mostValue))
+				mostValue = note;
+		}
+
+		return mostValue;
+	}
 };
 
 // Struct to store midi events. Self-descriptive, really.
@@ -258,7 +279,7 @@ public:
 					uint32_t len = ReadVar(file);
 
 					if (metaType == 0x51 && len == 3) {
-						uint8_t buf[3];
+						uint8_t buf[3]{};
 						file.read((char*)buf, 3);
 						uint32_t newTempo = (buf[0] << 16) | (buf[1] << 8) | buf[2];
 						tempoMap.push_back({tick, newTempo});
@@ -274,7 +295,7 @@ public:
 		}
 
 		// Sort tempo map by tick position
-		std::sort(tempoMap.begin(), tempoMap.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
+		std::ranges::sort(tempoMap, [](const auto& a, const auto& b) { return a.tick < b.tick; });
 
 		// Convert tick-based events to real-time events using the global tempo map
 		std::vector<MidiEvent> events;
@@ -285,7 +306,7 @@ public:
 		}
 
 		// Sort the events by time.
-		std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.timeMs < b.timeMs; });
+		std::ranges::sort(events, [](const auto& a, const auto& b) { return a.timeMs < b.timeMs; });
 
 		return events;
 	}
@@ -314,7 +335,7 @@ private:
 
 	static inline uint32_t Read32(std::ifstream& f) {
 		// Read 4 bytes in big-endian order (MIDI standard)
-		uint8_t b[4];
+		uint8_t b[4]{};
 		f.read(reinterpret_cast<char*>(b), 4);
 		return (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | uint32_t(b[3]);
 	}
@@ -322,7 +343,7 @@ private:
 
 	static inline uint16_t Read16(std::ifstream& f) {
 		// Read 2 bytes in big-endian order (MIDI standard)
-		uint8_t b[2];
+		uint8_t b[2]{};
 		f.read(reinterpret_cast<char*>(b), 2);
 		return (uint16_t(b[0]) << 8) | uint16_t(b[1]);
 	}
@@ -371,6 +392,17 @@ private:
 	}
 };
 
+// Small function to make a number fit in a range.
+int Compress(int note, int min, int max) {
+	if (note < min)
+		while (note < min)
+			note += 12;
+	else while (note > max)
+		note -= 12;
+
+	return note;
+}
+
 
 class MidiLiveInput {
 private:
@@ -378,6 +410,10 @@ private:
 	MidiMapper& mapper;
 	KeyboardEmitter& emitter;
 	std::unordered_set<int> pressed;
+	int min = 0;
+	int max = 0;
+	int transpose = 0;
+	bool compress = false;
 	std::mutex mutex;
 
 	static void CALLBACK Callback(HMIDIIN, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR) {
@@ -389,8 +425,11 @@ private:
 		auto* self = reinterpret_cast<MidiLiveInput*>(instance);
 
 		uint8_t status = param1 & 0xFF;
-		uint8_t note = (param1 >> 8) & 0xFF;
+		uint8_t note = (uint8_t)self->transpose + ((param1 >> 8) & 0xFF);
 		uint8_t vel = (param1 >> 16) & 0xFF;
+
+		if (self->compress)
+			note = (uint8_t)Compress(note, self->min, self->max);
 
 		// Get the mapped key.
 		auto mapped = self->mapper.MapNote(note);
@@ -422,7 +461,7 @@ private:
 
 
 public:
-	MidiLiveInput(MidiMapper& mapper, KeyboardEmitter& emitter) : mapper(mapper), emitter(emitter) {}
+	MidiLiveInput(MidiMapper& mapper, KeyboardEmitter& emitter, bool compress, int transpose) : mapper(mapper), emitter(emitter), compress(compress), transpose(transpose) {}
 
 	void Start(HWND statusHwnd) {
 		// If there are no MIDI devices attached, we can't get midi input. Crazy. Crazy? I was-
@@ -432,6 +471,10 @@ public:
 		// Something up with the Midi device. I don't really care what. Not my problem.
 		if (midiInOpen(&handle, 0, (DWORD_PTR)&Callback, (DWORD_PTR)this, CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
 			throw MidiDeviceException("Failed to open MIDI device");
+
+		// Get the min and max, for if we compress
+		min = mapper.GetExtremeValue([](int a, int b) {return a < b; });
+		max = mapper.GetExtremeValue([](int a, int b) {return a > b; });
 
 		// GO GO GO
 		// Start listening to midi input.
@@ -454,19 +497,24 @@ public:
 
 
 // Control IDs. have to be ints rather than HMENU to appease the linter's pointer const requirements.
-constexpr int ID_EDIT_FILE  = 101;
+constexpr int ID_EDIT_FILE = 101;
 constexpr int ID_BTN_BROWSE = 102;
 constexpr int ID_CHK_WHITES = 103;
-constexpr int ID_CHK_LOOP   = 104;
-constexpr int ID_BTN_PLAY   = 105;
-constexpr int ID_BTN_LIVE   = 106;
-constexpr int ID_BTN_STOP   = 107;
-constexpr int ID_LBL_STATUS = 108;
+constexpr int ID_CHK_LOOP = 104;
+constexpr int ID_CHK_COMPRESS = 105;
+constexpr int ID_EDIT_TRANSPOSE = 106;
+constexpr int ID_SPN_TRANSPOSE = 107;
+constexpr int ID_BTN_PLAY = 108;
+constexpr int ID_BTN_LIVE = 109;
+constexpr int ID_BTN_STOP = 110;
+constexpr int ID_LBL_STATUS = 111;
 
 struct AppState {
 	std::string filePath;
 	bool whitesOnly = false;
 	bool loop = false;
+	bool compress = false;
+	int transpose = 0;
 	std::atomic<bool> playing = false;
 	std::atomic<bool> liveMode = false;
 
@@ -474,6 +522,9 @@ struct AppState {
 	HWND handleEdit{};
 	HWND handleChkWhites{};
 	HWND handleChkLoop{};
+	HWND handleChkCompress{};
+	HWND handleEditTranspose{};
+	HWND handleSpinTranspose{};
 	HWND handleBtnPlay{};
 	HWND handleBtnLive{};
 	HWND handleBtnStop{};
@@ -489,17 +540,28 @@ struct AppState {
 AppState* g_state = nullptr;
 std::jthread playThread;
 
+
 void Play(AppState& state) {
 	// Put the playing and parsing inside a try/catch for "good enough" error handling
 	try {
 		// Update value
 		state.whitesOnly = (IsDlgButtonChecked(GetParent(state.handleChkWhites), ID_CHK_WHITES) == BST_CHECKED);
+		state.compress = (IsDlgButtonChecked(GetParent(state.handleChkCompress), ID_CHK_COMPRESS) == BST_CHECKED);
+
+		// Get the transposition
+		std::string buf(256, '\0');
+		GetWindowTextA(state.handleEditTranspose, buf.data(), buf.size());
+		state.transpose = 12 * stoi(buf);
 
 		// Set up the map, emitter, and parse the midi file.
 		// Parsing is probably one of the most likely parts to throw an error.
 		MidiMapper mapper(state.whitesOnly);
 		KeyboardEmitter emitter;
 		auto events = MidiFileParser::Parse(state.filePath);
+
+		// Get the min and max, for if we compress
+		const int min = mapper.GetExtremeValue([](int a, int b) {return a < b; });
+		const int max = mapper.GetExtremeValue([](int a, int b) {return a > b; });
 
 		// Wait 3 seconds.
 		Sleep(3000);
@@ -524,13 +586,34 @@ void Play(AppState& state) {
 				// Sleep intil the event
 				std::this_thread::sleep_until(start + std::chrono::milliseconds(e.timeMs));
 
+				// Transpose the note
+				int note = e.note + state.transpose;
+
 				// Get the corresponding input to the event. If it exists, play it.
-				if (auto mapped = mapper.MapNote(e.note); mapped.has_value())
+				if (auto mapped = mapper.MapNote(note); mapped.has_value()) {
+					emitter.SendKey(*mapped, e.noteOn);
+					continue;
+				}
+				
+				if (!state.compress)
+					continue;
+
+				note = Compress(note, min, max);
+
+				if (auto mapped = mapper.MapNote(note); mapped.has_value())
 					emitter.SendKey(*mapped, e.noteOn);
 			}
 		} while (state.loop && state.playing);
 	} catch (const std::exception& ex) { // ZOINKS!
 		SetWindowTextA(state.handleStatus, ex.what());
+
+		// Re-enable the buttons.
+		EnableWindow(state.handleBtnPlay, TRUE);
+		EnableWindow(state.handleBtnLive, TRUE);
+		EnableWindow(state.handleBtnStop, FALSE);
+
+		// So the message doesn't get overridden.
+		return;
 	}
 
 	// Re-enable the buttons.
@@ -541,7 +624,7 @@ void Play(AppState& state) {
 	// state.playing will be true if we finished, or false if we were stopped.
 	if (state.playing) {
 		state.playing = false;
-		SetWindowTextA(state.handleStatus, "Done.");
+		//SetWindowTextA(state.handleStatus, "Done.");
 	} else {
 		SetWindowTextA(state.handleStatus, "Stopped.");
 	}
@@ -550,7 +633,7 @@ void Play(AppState& state) {
 void StartFilePlayback(AppState& state) {
 	// Grab the file path from the edit box
 	std::string buf(256, '\0');
-	GetWindowTextA(state.handleEdit, buf.data(), 256);
+	GetWindowTextA(state.handleEdit, buf.data(), buf.size());
 
 	//resize the path to what's needed
 	buf.resize(strnlen(buf.data(), buf.size()));
@@ -580,18 +663,29 @@ void StartFilePlayback(AppState& state) {
 
 void StartLiveInput(AppState& state) {
 	try {
-		// Check whites only
+		// Check whites only & compress
 		state.whitesOnly = (IsDlgButtonChecked(GetParent(state.handleChkWhites), ID_CHK_WHITES) == BST_CHECKED);
+		state.compress = (IsDlgButtonChecked(GetParent(state.handleChkCompress), ID_CHK_COMPRESS) == BST_CHECKED);
+
+		// Get the transposition
+		std::string buf(256, '\0');
+		GetWindowTextA(g_state->handleEditTranspose, buf.data(), buf.size());
+		g_state->transpose = 12 * stoi(buf);
 
 		state.liveMapper = std::make_unique<MidiMapper>(state.whitesOnly);
 		state.liveEmitter = std::make_unique<KeyboardEmitter>();
-		state.liveInput = std::make_unique<MidiLiveInput>(*state.liveMapper, *state.liveEmitter);
+		state.liveInput = std::make_unique<MidiLiveInput>(*state.liveMapper, *state.liveEmitter, state.compress, state.transpose);
 
 		state.liveInput->Start(state.handleStatus);
 
 		state.liveMode = true;
 		EnableWindow(state.handleBtnPlay, FALSE);
 		EnableWindow(state.handleBtnLive, FALSE);
+		EnableWindow(state.handleChkWhites, FALSE);
+		EnableWindow(state.handleChkLoop, FALSE);
+		EnableWindow(state.handleChkCompress, FALSE);
+		EnableWindow(state.handleEditTranspose, FALSE);
+		EnableWindow(state.handleSpinTranspose, FALSE);
 		EnableWindow(state.handleBtnStop, TRUE);
 	} catch (const std::exception& ex) {
 		SetWindowTextA(state.handleStatus, ex.what());
@@ -614,12 +708,20 @@ void Stop(AppState& state) {
 		// Re-enable the buttons.
 		EnableWindow(state.handleBtnPlay, TRUE);
 		EnableWindow(state.handleBtnLive, TRUE);
+		EnableWindow(state.handleChkWhites, TRUE);
+		EnableWindow(state.handleChkLoop, TRUE);
+		EnableWindow(state.handleChkCompress, TRUE);
+		EnableWindow(state.handleEditTranspose, TRUE);
+		EnableWindow(state.handleSpinTranspose, TRUE);
 		EnableWindow(state.handleBtnStop, FALSE);
 	}
 }
 
 // Create the UI
 LRESULT CALLBACK Create(HWND hwnd, LPARAM lParam) {
+	// Load DLLs for updown spin
+	InitCommonControls();
+
 	// Get the HInstance
 	HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
 
@@ -640,12 +742,32 @@ LRESULT CALLBACK Create(HWND hwnd, LPARAM lParam) {
 	// Checkboxes
 	g_state->handleChkWhites = CreateWindowW(L"BUTTON", L"15 keys (Double Row)",
 		WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
-		10, 45, 200, 24, hwnd, (HMENU)ID_CHK_WHITES, hInst, nullptr);
+		10, 45, 160, 24, hwnd, (HMENU)ID_CHK_WHITES, hInst, nullptr);
 
 	g_state->handleChkLoop = CreateWindowW(L"BUTTON", L"Loop",
 		WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
-		200, 45, 120, 24, hwnd, (HMENU)ID_CHK_LOOP, hInst, nullptr);
+		180, 45, 50, 24, hwnd, (HMENU)ID_CHK_LOOP, hInst, nullptr);
 
+	g_state->handleChkCompress = CreateWindowW(L"BUTTON", L"Compress",
+		WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+		240, 45, 90, 24, hwnd, (HMENU)ID_CHK_COMPRESS, hInst, nullptr);
+
+	// Transpose
+	g_state->handleEditTranspose = CreateWindowW(L"Edit", L"0",
+		WS_CHILD | WS_VISIBLE | ES_NUMBER,
+		340, 45, 50, 24, hwnd, (HMENU)ID_EDIT_TRANSPOSE, hInst, nullptr);
+
+	g_state->handleSpinTranspose = CreateWindowW(UPDOWN_CLASS, L"Transpose",
+		WS_CHILD | WS_VISIBLE | UDS_WRAP | UDS_ARROWKEYS | UDS_SETBUDDYINT,
+		390, 45, 20, 24, hwnd, (HMENU)ID_SPN_TRANSPOSE, hInst, nullptr);
+
+	CreateWindowW(L"STATIC", L"Transpose",
+		WS_CHILD | WS_VISIBLE,
+		410, 48, 80, 24, hwnd, nullptr, hInst, nullptr);
+
+	// Set buddy & range
+	SendMessage(g_state->handleSpinTranspose, UDM_SETBUDDY, (WPARAM)g_state->handleEditTranspose, 0L);
+	SendMessage(g_state->handleSpinTranspose, UDM_SETRANGE, 0, MAKELPARAM(24, -24));
 
 	// Buttons
 	g_state->handleBtnPlay = CreateWindowW(L"BUTTON", L"Play File",
@@ -677,7 +799,8 @@ LRESULT CALLBACK Create(HWND hwnd, LPARAM lParam) {
 LRESULT CALLBACK Command(WPARAM wParam, HWND hwnd) {
 	switch (LOWORD(wParam)) {
 		// Open file browser
-		case ID_BTN_BROWSE: {
+		case ID_BTN_BROWSE:
+		{
 			char buf[256] = {}; // C-String... Sorry...
 
 			OPENFILENAMEA ofn{};
@@ -708,6 +831,12 @@ LRESULT CALLBACK Command(WPARAM wParam, HWND hwnd) {
 			CheckDlgButton(hwnd, ID_CHK_LOOP, g_state->loop ? BST_CHECKED : BST_UNCHECKED);
 			break;
 
+		case ID_CHK_COMPRESS:
+			// Toggle the checkbox state. Same code as above.
+			g_state->compress = !(IsDlgButtonChecked(hwnd, ID_CHK_COMPRESS) == BST_CHECKED);
+			CheckDlgButton(hwnd, ID_CHK_COMPRESS, g_state->compress ? BST_CHECKED : BST_UNCHECKED);
+			break;
+
 		case ID_BTN_PLAY:
 			StartFilePlayback(*g_state);
 			break;
@@ -736,14 +865,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		case WM_COMMAND:
 			return Command(wParam, hwnd);
 
+		case WM_VSCROLL: // spin control for transpose.
+			if ((HWND)(lParam) == g_state->handleSpinTranspose) {
+				std::string buf(50, '\0');
+				GetWindowTextA(g_state->handleEditTranspose, buf.data(), buf.size());
+				buf.resize(strnlen(buf.data(), buf.size()));
+
+				g_state->transpose = 12 * std::stoi(buf);
+
+				return 0;
+			}
+			break;
+
 		case WM_DESTROY:
 			// Clean up if still running
 			if (g_state->playing || g_state->liveMode)
 				Stop(*g_state);
 			PostQuitMessage(0);
 			return 0;
-			
-		// Linter wants default. I dunno, man. I tried and it broke.
+
+			// Linter wants default. I dunno, man. I tried and it broke.
 	}
 
 	return DefWindowProcW(hwnd, msg, wParam, lParam);
